@@ -1,0 +1,20 @@
+[project]
+name = "kovo"
+version = "0.1.0"
+description = "kono's cava"
+authors = [{ name = "Kono" }]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "prompt_toolkit>=3.0",
+    "numpy",
+    "sounddevice",  
+    "pydbus", 
+]
+
+[project.scripts]
+kovo = "kovo.main:entrypoint"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
