@@ -64,11 +64,11 @@ class ColorVariants:
 def make_variants(hexcode: str, name: str, darken_factor: float = 0.5) -> ColorVariants:
     d_hex = darken(hexcode, darken_factor)
     return ColorVariants(
-        fg    = color(hexcode),
-        ital    =color(hexcode, italic=True),
-        b_fg  = color(hexcode, bold=True),
-        bg    = color(BLACK, hexcode),
-        b_bg  = color(BLACK, hexcode, bold=True),
+        fg      = color(hexcode),
+        ital    = color(hexcode, italic=True),
+        b_fg    = color(hexcode, bold=True),
+        bg      = color(BLACK, hexcode),
+        b_bg    = color(BLACK, hexcode, bold=True),
         d_fg    = color(d_hex),
         d_b_fg  = color(d_hex, bold=True),
         d_bg    = color(BLACK, d_hex),
@@ -163,128 +163,165 @@ bgb_s15 = color(BLACK, S15, bold=True)
 bgb_s16 = color(BLACK, S16, bold=True)
 bgb_s17 = color(BLACK, S17, bold=True)
 
-# --- ASCII ART ---
 import numpy as np
-if not hasattr(State, "bands"):
-    State.bands = None
+from .state import State
 
-import numpy as np
+# --- SETTINGS ---
+BAR_WIDTH = 2
+BAR_GAP = 1
+GAIN = 0.5
+PREEMPHASIS_COEFFICIENT = 0.97  # A common value for pre-emphasis filters
+SMOOTHING_FACTOR = 0.4
+BASS_SMOOTHING = 0.2    # Slower response for bass
+TREBLE_SMOOTHING = 0.6  # Faster response for treble
+MID_RANGE_SMOOTHING = 0.8 # Fastest response for the middle
+RISE_SPEED = 0.4
+FALL_SPEED = 0.2
+MIN_FREQ = 50
+MAX_FREQ = 10000
+FFT_SIZE = 4096
+LINEAR_BARS = 3       # Number of bars to handle linearly
+LINEAR_FREQ_CUTOFF = 200 # Frequency (Hz) at which to switch from linear to log scale
+BASE_RISE_SPEED = 0.4
+BASE_FALL_SPEED = 0.2
+TREBLE_FALL_FACTOR = 0.8 # Higher value makes treble fall faster
+TREBLE_RISE_FACTOR = 1.5 # Higher value makes treble rise faster
+BAR_CHARS = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
 
-# ---------------- CONFIGURATION ----------------
-CFG = {
-    "smoothing": 0.8,           # CAVA default smoothing
-    "noise_reduction": 0.77,    # noise floor
-    "sensitivity": 1.0,         # overall gain
-    "min_freq": 20,             # lowest frequency
-    "max_freq": 20000,          # highest frequency
-    "gravity": 2.0,             # how fast bars fall
-    "integral": 0.7,            # smoothing integral
-}
-# -----------------------------------------------
 
-def wave_fmt(window):
-    """
-    True CAVA-style audio visualization matching the reference image.
-    """
-    if not State.is_up:
-        return [(s0, "nothing...")]
+prev_bars = []
 
-    return [(s0, f"{State.artist} {State.title} {State.album} {State.frame_count}\n1 = {State.Lpeak}   {State.Lvol}\n2 = {State.Rpeak}   {State.Rvol}")]
-    width = window.render_info.window_width
-    height = window.render_info.window_height
-    
-    # CAVA uses the full width as individual bars
-    n_bars = width
+# --- LOGARITHMIC BIN MAPPING (safe) ---
+def get_cava_bins(sample_rate, fft_size, num_bars):
+    freqs = np.fft.rfftfreq(fft_size, 1 / sample_rate)
 
-    # --- FFT Processing (CAVA style) ---
-    # Apply Hann window
-    windowed_audio = audio * np.hanning(len(audio))
+    # 1. Linear part for the lowest frequencies
+    linear_bins = np.linspace(MIN_FREQ, LINEAR_FREQ_CUTOFF, LINEAR_BARS + 1)
+
+    # 2. Logarithmic part for the rest
+    log_bins = np.logspace(np.log10(LINEAR_FREQ_CUTOFF), np.log10(MAX_FREQ), num_bars - LINEAR_BARS + 1)
+
+    # Combine and remove the overlapping point
+    all_bins = np.concatenate([linear_bins[:-1], log_bins])
+
+    bin_indices = np.searchsorted(freqs, all_bins)
+    bin_indices = np.clip(bin_indices, 1, len(freqs) - 1)
     
-    # FFT
-    fft_data = np.fft.rfft(windowed_audio)
-    magnitude = np.abs(fft_data)
-    freqs = np.fft.rfftfreq(len(audio), 1.0 / State.sample_rate)
+    return bin_indices
+
+# --- FFT PROCESSING (revised) ---
+def process_fft(audio_data, sample_rate, num_bars):
+    if audio_data is None or len(audio_data) < 2:
+        return np.zeros(num_bars)
+
+    # Apply a pre-emphasis filter to the audio data
+    pre_emphasized = np.zeros_like(audio_data)
+    pre_emphasized[1:] = audio_data[1:] - PREEMPHASIS_COEFFICIENT * audio_data[:-1]
     
-    # --- CAVA Frequency Bin Mapping ---
-    # CAVA uses logarithmic frequency distribution
-    # Create frequency boundaries for each bar
-    freq_boundaries = np.logspace(
-        np.log10(CFG["min_freq"]), 
-        np.log10(CFG["max_freq"]), 
-        n_bars + 1
-    )
-    
-    bar_values = np.zeros(n_bars)
-    
-    # Map frequency bins to bars (CAVA method)
-    for i in range(n_bars):
-        freq_low = freq_boundaries[i]
-        freq_high = freq_boundaries[i + 1]
-        
-        # Find FFT bins in this frequency range
-        mask = (freqs >= freq_low) & (freqs < freq_high)
-        
-        if np.any(mask):
-            # CAVA takes the sum of magnitudes in the frequency range
-            bar_values[i] = np.sum(magnitude[mask])
+    # Pad or slice to FFT_SIZE
+    if len(pre_emphasized) < FFT_SIZE:
+        padded = np.zeros(FFT_SIZE)
+        padded[:len(pre_emphasized)] = pre_emphasized
+    else:
+        padded = pre_emphasized[:FFT_SIZE]
+
+    windowed = padded * np.hanning(FFT_SIZE)
+    fft = np.fft.rfft(windowed)
+    magnitude = np.abs(fft)
+
+    # Use a simple logarithmic binning for a smooth distribution
+    freqs = np.fft.rfftfreq(FFT_SIZE, 1/sample_rate)
+    log_bins = np.logspace(np.log10(MIN_FREQ), np.log10(MAX_FREQ), num_bars + 1)
+    bin_indices = np.searchsorted(freqs, log_bins)
+    bin_indices = np.clip(bin_indices, 1, len(freqs)-1)
+
+    bars = np.zeros(num_bars)
+    for i in range(num_bars):
+        start, end = bin_indices[i], bin_indices[i+1]
+        if end > start:
+            bars[i] = np.mean(magnitude[start:end])
         else:
-            bar_values[i] = 0
-    
-    # --- CAVA Processing Chain ---
-    # Convert to dB-like scale
-    bar_values = np.log10(bar_values + 1e-10)
-    
-    # Normalize
-    if bar_values.max() > bar_values.min():
-        bar_values = (bar_values - bar_values.min()) / (bar_values.max() - bar_values.min())
-    
-    # Apply sensitivity
-    bar_values *= CFG["sensitivity"]
-    
-    # Initialize smoothing state
-    if not hasattr(State, 'prev_bars') or len(State.prev_bars) != n_bars:
-        State.prev_bars = np.zeros(n_bars)
-        State.fall_bars = np.zeros(n_bars)
-    
-    # --- CAVA Smoothing Algorithm ---
-    for i in range(n_bars):
-        current = bar_values[i]
-        
-        # Noise reduction
-        if current < CFG["noise_reduction"]:
-            current = 0
-        
-        # CAVA smoothing: quick attack, slow release
-        if current > State.prev_bars[i]:
-            # Rising - quick response
-            State.prev_bars[i] = CFG["integral"] * State.prev_bars[i] + (1 - CFG["integral"]) * current
+            bars[i] = magnitude[start]
+
+    max_val = np.max(bars)
+    if max_val > 1e-6:
+        bars /= max_val
+
+    return bars
+
+# --- CAVA SMOOTHING ---
+def smooth_bars(current, previous):
+    if len(previous) != len(current):
+        return current.copy()
+
+    smoothed = np.zeros_like(current)
+    num_bars = len(current)
+    center_bar = num_bars // 2
+
+    for i in range(num_bars):
+        # A simple model for frequency-dependent smoothing
+        if i < num_bars * 0.2: # First 20% of bars (bass)
+            smooth_factor_i = SMOOTHING_FACTOR * BASS_SMOOTHING
+        elif i > num_bars * 0.8: # Last 20% of bars (treble)
+            smooth_factor_i = SMOOTHING_FACTOR * TREBLE_SMOOTHING
+        else: # Middle 60% of bars
+            smooth_factor_i = SMOOTHING_FACTOR * MID_RANGE_SMOOTHING
+            
+        if current[i] > previous[i]:
+            # Apply a higher gain/rise speed for the middle bars
+            rise_gain = 1.0 + (1.5 if i > num_bars * 0.2 and i < num_bars * 0.8 else 0)
+            smoothed[i] = previous[i] + (current[i] - previous[i]) * rise_gain * (1 - smooth_factor_i)
         else:
-            # Falling - apply gravity
-            State.fall_bars[i] += CFG["gravity"] / height
-            State.prev_bars[i] = max(current, State.prev_bars[i] - State.fall_bars[i])
-            if State.prev_bars[i] <= current:
-                State.fall_bars[i] = 0
-    
-    # Scale to terminal height
-    scaled_bars = (State.prev_bars * height).astype(int)
-    scaled_bars = np.clip(scaled_bars, 0, height)
-    
-    # --- Render exactly like CAVA ---
-    lines = []
+            # Slower fall speed
+            smoothed[i] = previous[i] * (1 - SMOOTHING_FACTOR) + current[i] * SMOOTHING_FACTOR
+        
+        # Final smoothing based on overall factor
+        smoothed[i] = previous[i] * (1 - SMOOTHING_FACTOR) + smoothed[i] * SMOOTHING_FACTOR
+
+    return smoothed
+
+# --- DISPLAY HEIGHT ---
+def bars_to_display(bars, height):
+    return np.clip((bars * GAIN * (height-1)).astype(int), 0, height-1)
+
+# --- RENDER ---
+def render_bars(bar_heights, width, height):
+    display_lines = []
+    num_bars = len(bar_heights)
+
     for row in range(height):
         line = ""
-        for col in range(width):
-            if col < len(scaled_bars):
-                bar_height = scaled_bars[col]
-                # Draw from bottom up (CAVA style)
-                if (height - row) <= bar_height:
-                    line += "█"
-                else:
-                    line += " "
-            else:
-                line += " "
-        lines.append(line)
-    
-    
+        for i in range(num_bars):
+            bar_height = bar_heights[i]
+            display_row = height - 1 - row
+            char = BAR_CHARS[-1] if display_row < bar_height else BAR_CHARS[0]
+            line += char * BAR_WIDTH
+            if i < num_bars - 1:
+                line += " " * BAR_GAP
+        display_lines.append((s0, line.ljust(width) + "\n"))
+    return display_lines
 
+# --- MAIN FORMATTER ---
+def wave_fmt(window):
+    global prev_bars
 
+    if not State.is_up or State.Ln is None:
+        return [(s0, "waiting for audio...")]
+
+    width = window.render_info.window_width
+    height = window.render_info.window_height
+    if width <= 0 or height <= 0:
+        return [(s0, "invalid dimensions")]
+
+    num_bars = max(1, width // (BAR_WIDTH + BAR_GAP))
+    audio_data = (State.Ln + State.Rn) * 0.5 if State.Rn is not None else State.Ln
+    #print("audio max:", np.max(np.abs(audio_data)), "len:", len(audio_data))
+    current = process_fft(audio_data, State.sample_rate, num_bars)
+    if len(prev_bars) != num_bars:
+        prev_bars = np.zeros(num_bars)
+
+    smoothed = smooth_bars(current, prev_bars)
+    prev_bars = smoothed.copy()
+
+    bar_heights = bars_to_display(smoothed, height)
+    return render_bars(bar_heights, width, height)

@@ -24,14 +24,14 @@ def songfetch():
             continue
     
 def audiofetch():
-    def_frame_count = 1024
+    def_frame_count = 4096
     def_device = 'pulse'
     def_sample_rate = 44100
     def callback(indata, frames, time_info, status):
         try:
             # Store raw stereo PCM data
-            State.L = indata[:, 0]  # Left raw int32
-            State.R = indata[:, 1]  # Right raw int32
+            State.L = np.pad(indata[:, 0], (0, max(0, 4096 - len(indata))), 'constant')
+            State.R = np.pad(indata[:, 1], (0, max(0, 4096 - len(indata))), 'constant')
             
             # Normalize to [-1, 1] for FFT processing
             State.Ln = State.L.astype(np.float64) / 2147483648.0
@@ -48,7 +48,7 @@ def audiofetch():
             State.Mpeak = max(State.Lpeak, State.Rpeak)
             
             # Audio info
-            State.sample_rate = int(sd.query_devices(sd.default.device[0], 'input')['default_samplerate'])
+            State.sample_rate = def_sample_rate
             State.frame_count = def_frame_count
             State.is_silent = State.Mvol < 0.001  # -60dB threshold
             State.is_up = True
